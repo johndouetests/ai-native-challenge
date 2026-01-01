@@ -1,0 +1,622 @@
+openapi: 3.1.0
+info:
+  title: PointsHub API
+  version: 1.0.0
+  description: |
+    Loyalty points service: earning, redeeming rewards, transfers between users,
+    partner webhooks and balance updates over WebSocket (see SPEC.md, section "WebSocket protocol").
+
+    * All ids are strings (`u_1`, `rw_1`, `rd_1`, `tr_1`, `le_0000000001`).
+    * All timestamps are ISO 8601 strings in UTC (`2026-03-09T12:00:00.000Z`).
+    * Every error uses the `Error` schema.
+servers:
+  - url: http://localhost:4020
+security:
+  - bearer: []
+
+tags:
+  - name: system
+  - name: profile
+  - name: accounts
+  - name: rewards
+  - name: redemptions
+  - name: transfers
+  - name: partner
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: Service status
+      security: []
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, wsConnections]
+                properties:
+                  status: { type: string, examples: [ok] }
+                  wsConnections:
+                    type: integer
+                    minimum: 0
+                    description: Number of open WebSocket connections on /v1/stream
+
+  /v1/me:
+    get:
+      tags: [profile]
+      summary: Current user profile
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [profile]
+      summary: Update the current user's profile
+      description: Only `displayName` can be changed. Any other property gives 400 `invalid_body`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [displayName]
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 60 }
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profile' }
+        '400': { $ref: '#/components/responses/InvalidBody' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/accounts/{userId}/balance:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [accounts]
+      summary: Account balance (owner or admin)
+      responses:
+        '200':
+          description: Balance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Balance' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/accounts/{userId}/ledger:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [accounts]
+      summary: Ledger entries (owner or admin)
+      description: |
+        Sorted by `(createdAt DESC, id DESC)`. Use `nextCursor` as `cursor` to get the next page;
+        `nextCursor` is `null` on the last page.
+
+        `from` / `to` accept a date (`YYYY-MM-DD`) or a date-time with `Z` or an explicit offset.
+        A date means a whole UTC day: `from=2026-03-09` starts at `2026-03-09T00:00:00.000Z`,
+        `to=2026-03-09` includes everything up to the end of that UTC day. Date-times are inclusive.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque value from a previous `nextCursor`
+        - name: from
+          in: query
+          schema: { type: string, examples: ['2026-03-09', '2026-03-09T00:00:00+02:00'] }
+        - name: to
+          in: query
+          schema: { type: string, examples: ['2026-03-09', '2026-03-09T23:59:59.999Z'] }
+        - name: kind
+          in: query
+          schema: { $ref: '#/components/schemas/LedgerKind' }
+      responses:
+        '200':
+          description: One page of entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/LedgerEntry' }
+                  nextCursor: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/InvalidBody' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/accounts/{userId}/earn:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    post:
+      tags: [accounts]
+      summary: Credit points (admin)
+      description: |
+        Purchase points are `floor(amountMinor * tierBp / 1000000)` (integer arithmetic) with
+        tierBp bronze 10000, silver 12500, gold 15000. Earn entries (purchase, promo, partner)
+        are limited to 5000 points per account per UTC day.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/EarnPurchase'
+                - $ref: '#/components/schemas/EarnPromo'
+              discriminator:
+                propertyName: type
+      responses:
+        '201':
+          description: Points credited (a replay carries `Idempotent-Replayed`)
+          headers:
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EarnResult' }
+        '400': { $ref: '#/components/responses/InvalidBodyOrKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /v1/rewards:
+    get:
+      tags: [rewards]
+      summary: Reward catalogue with stock
+      responses:
+        '200':
+          description: All rewards, including inactive ones
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Reward' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/redemptions:
+    post:
+      tags: [redemptions]
+      summary: Redeem a reward for points
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [rewardId]
+              properties:
+                rewardId: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '201':
+          description: Redemption created in `pending` state
+          headers:
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RedemptionWithBalance' }
+        '400': { $ref: '#/components/responses/InvalidBodyOrKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`insufficient_points`, `out_of_stock`, `reward_unavailable` or `request_in_progress`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+  /v1/redemptions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RedemptionId'
+    get:
+      tags: [redemptions]
+      summary: Read a redemption (owner or admin)
+      responses:
+        '200':
+          description: Redemption
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [redemption]
+                properties:
+                  redemption: { $ref: '#/components/schemas/Redemption' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/redemptions/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/RedemptionId'
+    post:
+      tags: [redemptions]
+      summary: Cancel a pending redemption (owner or admin)
+      description: Adds a `reversal` ledger entry and returns the reward to stock.
+      responses:
+        '200':
+          description: Cancelled; `balance` is the owner's new balance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RedemptionWithBalance' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/redemptions/{id}/fulfill:
+    parameters:
+      - $ref: '#/components/parameters/RedemptionId'
+    post:
+      tags: [redemptions]
+      summary: Mark a pending redemption as fulfilled (admin)
+      responses:
+        '200':
+          description: Fulfilled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [redemption]
+                properties:
+                  redemption: { $ref: '#/components/schemas/Redemption' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/transfers:
+    post:
+      tags: [transfers]
+      summary: Transfer points to another user
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [toUserId, points]
+              properties:
+                toUserId: { type: string, minLength: 1, maxLength: 64 }
+                points: { $ref: '#/components/schemas/Points' }
+      responses:
+        '201':
+          description: Transfer completed; `balance` is the sender's new balance
+          headers:
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transfer, balance]
+                properties:
+                  transfer: { $ref: '#/components/schemas/Transfer' }
+                  balance: { type: integer }
+        '400': { $ref: '#/components/responses/InvalidBodyOrKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`insufficient_points`, `receiver_unavailable` or `request_in_progress`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`self_transfer` or `idempotency_key_reuse`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/partner/events:
+    post:
+      tags: [partner]
+      summary: Partner purchase webhook (HMAC signed)
+      description: |
+        `X-Signature` is the lowercase hex `HMAC-SHA256(secret, X-Timestamp + "." + rawBody)`,
+        computed over the exact request bytes. `X-Timestamp` is Unix time in seconds and must be
+        within 300 seconds of the server time. Points use the same formula as purchases and count
+        towards the daily earn limit. A repeated `eventId` (per partner) is acknowledged with 200.
+      security: []
+      parameters:
+        - name: X-Partner-Id
+          in: header
+          required: true
+          schema: { type: string, examples: [partner_demo] }
+        - name: X-Timestamp
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[0-9]+$' }
+        - name: X-Signature
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [eventId, userId, amountMinor]
+              properties:
+                eventId: { type: string, minLength: 1, maxLength: 128 }
+                userId: { type: string, minLength: 1, maxLength: 64 }
+                amountMinor: { $ref: '#/components/schemas/AmountMinor' }
+      responses:
+        '201':
+          description: Points credited
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, entry, balance]
+                properties:
+                  status: { const: credited }
+                  entry: { $ref: '#/components/schemas/LedgerEntry' }
+                  balance: { type: integer }
+        '200':
+          description: The event was already processed; nothing changed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { const: duplicate }
+        '400': { $ref: '#/components/responses/InvalidBody' }
+        '401':
+          description: '`unauthorized` (missing or invalid signature, unknown partner) or `stale_timestamp`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/BusinessRule' }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Dev tokens are listed in README.md
+
+  parameters:
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, examples: [u_1] }
+    RedemptionId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, examples: [rd_6] }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Required. Scope: (user, method, path, key). Repeating a request with the same key and body
+        returns the stored response with `Idempotent-Replayed: true`. The same key with a different
+        body gives 422 `idempotency_key_reuse`; while the first request is still running, 409
+        `request_in_progress`. Only successful responses are stored.
+      schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,255}$' }
+
+  headers:
+    IdempotentReplayed:
+      description: '`true` when the response is a stored replay'
+      schema: { type: string, enum: ['true'] }
+
+  responses:
+    InvalidBody:
+      description: '`invalid_body`: body, query or header failed validation; `details` lists the fields'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvalidBodyOrKey:
+      description: '`invalid_body` or `idempotency_key_required`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: '`unauthorized`: missing or invalid bearer token'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: '`forbidden`: the resource belongs to another user, or admin role required'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: '`not_found`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: '`invalid_state` or `request_in_progress`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BusinessRule:
+      description: '`daily_cap_exceeded` or `idempotency_key_reuse`'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: '#/components/schemas/ErrorCode' }
+            message: { type: string }
+            details:
+              description: Present for validation errors
+              type: array
+              items:
+                type: object
+                required: [field, messages]
+                properties:
+                  field: { type: string }
+                  messages: { type: array, items: { type: string } }
+
+    ErrorCode:
+      type: string
+      enum:
+        - invalid_body
+        - unauthorized
+        - forbidden
+        - not_found
+        - idempotency_key_required
+        - idempotency_key_reuse
+        - request_in_progress
+        - insufficient_points
+        - out_of_stock
+        - reward_unavailable
+        - invalid_state
+        - self_transfer
+        - receiver_unavailable
+        - daily_cap_exceeded
+        - stale_timestamp
+        - internal_error
+
+    Points:
+      type: integer
+      minimum: 1
+      maximum: 1000000
+    AmountMinor:
+      type: integer
+      minimum: 1
+      maximum: 100000000
+      description: Purchase amount in minor currency units (cents)
+
+    Profile:
+      type: object
+      required: [id, email, displayName, role, tier, createdAt]
+      properties:
+        id: { type: string, examples: [u_1] }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { type: string, enum: [user, admin] }
+        tier: { type: string, enum: [bronze, silver, gold] }
+        createdAt: { type: string, format: date-time }
+
+    Balance:
+      type: object
+      required: [userId, balance, updatedAt]
+      properties:
+        userId: { type: string }
+        balance: { type: integer }
+        updatedAt: { type: string, format: date-time }
+
+    LedgerKind:
+      type: string
+      enum: [earn, redeem, transfer_in, transfer_out, reversal]
+
+    LedgerEntry:
+      type: object
+      required: [id, accountId, kind, points, balanceAfter, refType, refId, rewardName, createdAt]
+      properties:
+        id: { type: string, examples: [le_0000000214] }
+        accountId: { type: string }
+        kind: { $ref: '#/components/schemas/LedgerKind' }
+        points: { type: integer, description: Signed; negative for debits }
+        balanceAfter: { type: integer }
+        refType: { type: string, enum: [purchase, promo, partner, redemption, transfer] }
+        refId: { type: string, description: 'orderId, campaignId, "partnerId:eventId", redemption id or transfer id' }
+        rewardName:
+          type: [string, 'null']
+          description: Reward name for `redeem` and `reversal` entries, otherwise null
+        createdAt: { type: string, format: date-time }
+
+    EarnPurchase:
+      type: object
+      additionalProperties: false
+      required: [type, amountMinor, orderId]
+      properties:
+        type: { const: purchase }
+        amountMinor: { $ref: '#/components/schemas/AmountMinor' }
+        orderId: { type: string, minLength: 1, maxLength: 64 }
+    EarnPromo:
+      type: object
+      additionalProperties: false
+      required: [type, points, campaignId]
+      properties:
+        type: { const: promo }
+        points: { $ref: '#/components/schemas/Points' }
+        campaignId: { type: string, minLength: 1, maxLength: 64 }
+    EarnResult:
+      type: object
+      required: [entry, balance]
+      properties:
+        entry: { $ref: '#/components/schemas/LedgerEntry' }
+        balance: { type: integer }
+
+    Reward:
+      type: object
+      required: [id, name, costPoints, stock, active]
+      properties:
+        id: { type: string, examples: [rw_1] }
+        name: { type: string }
+        costPoints: { type: integer }
+        stock: { type: integer, minimum: 0 }
+        active: { type: boolean }
+
+    Redemption:
+      type: object
+      required: [id, userId, rewardId, points, status, createdAt, updatedAt]
+      properties:
+        id: { type: string, examples: [rd_6] }
+        userId: { type: string }
+        rewardId: { type: string }
+        points: { type: integer, description: Points charged }
+        status: { type: string, enum: [pending, fulfilled, cancelled] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    RedemptionWithBalance:
+      type: object
+      required: [redemption, balance]
+      properties:
+        redemption: { $ref: '#/components/schemas/Redemption' }
+        balance: { type: integer }
+
+    Transfer:
+      type: object
+      required: [id, fromUserId, toUserId, points, createdAt]
+      properties:
+        id: { type: string, examples: [tr_9] }
+        fromUserId: { type: string }
+        toUserId: { type: string }
+        points: { type: integer }
+        createdAt: { type: string, format: date-time }

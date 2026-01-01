@@ -1,0 +1,96 @@
+# PointsHub example requests (VS Code REST Client / JetBrains HTTP Client).
+# Start the service with `npm run dev`; tokens are the dev tokens from README.md.
+
+@base = http://localhost:4020
+@user = pts_dev_u1
+@admin = pts_dev_admin
+
+### Health
+GET {{base}}/healthz
+
+### Current user
+GET {{base}}/v1/me
+Authorization: Bearer {{user}}
+
+### Change display name
+PATCH {{base}}/v1/me
+Authorization: Bearer {{user}}
+Content-Type: application/json
+
+{ "displayName": "Ana N." }
+
+### Balance
+GET {{base}}/v1/accounts/u_1/balance
+Authorization: Bearer {{user}}
+
+### Ledger, first page
+GET {{base}}/v1/accounts/u_1/ledger?limit=20
+Authorization: Bearer {{user}}
+
+### Ledger for one UTC day, earn entries only
+GET {{base}}/v1/accounts/u_1/ledger?from=2026-03-09&to=2026-03-09&kind=earn
+Authorization: Bearer {{user}}
+
+### Ledger with explicit offsets
+GET {{base}}/v1/accounts/u_1/ledger?from=2026-03-09T00:00:00%2B02:00&to=2026-03-09T23:59:59.999%2B02:00
+Authorization: Bearer {{user}}
+
+### Earn: purchase (admin)
+POST {{base}}/v1/accounts/u_1/earn
+Authorization: Bearer {{admin}}
+Idempotency-Key: earn-purchase-001
+Content-Type: application/json
+
+{ "type": "purchase", "amountMinor": 12990, "orderId": "ord_5001" }
+
+### Earn: promo (admin)
+POST {{base}}/v1/accounts/u_2/earn
+Authorization: Bearer {{admin}}
+Idempotency-Key: earn-promo-001
+Content-Type: application/json
+
+{ "type": "promo", "points": 250, "campaignId": "cmp_autumn" }
+
+### Rewards
+GET {{base}}/v1/rewards
+Authorization: Bearer {{user}}
+
+### Redeem a reward
+POST {{base}}/v1/redemptions
+Authorization: Bearer {{user}}
+Idempotency-Key: redeem-001
+Content-Type: application/json
+
+{ "rewardId": "rw_1" }
+
+### Read a redemption
+GET {{base}}/v1/redemptions/rd_6
+Authorization: Bearer {{user}}
+
+### Cancel a pending redemption
+POST {{base}}/v1/redemptions/rd_6/cancel
+Authorization: Bearer {{user}}
+
+### Fulfill a pending redemption (admin)
+POST {{base}}/v1/redemptions/rd_13/fulfill
+Authorization: Bearer {{admin}}
+
+### Transfer points
+POST {{base}}/v1/transfers
+Authorization: Bearer {{user}}
+Idempotency-Key: transfer-001
+Content-Type: application/json
+
+{ "toUserId": "u_2", "points": 100 }
+
+### Partner event
+# The signature depends on the current time, so build this request with a script:
+#   node -e "const c=require('crypto');const b=JSON.stringify({eventId:'evt_1',userId:'u_2',amountMinor:5000});const t=Math.floor(Date.now()/1000);console.log(t, c.createHmac('sha256','pd_dev_secret_2b7e151628aed2a6').update(t+'.'+b).digest('hex'), b)"
+# then paste the timestamp and signature below (the body must be byte-identical).
+POST {{base}}/v1/partner/events
+X-Partner-Id: partner_demo
+X-Timestamp: 1767225600
+X-Signature: 0000000000000000000000000000000000000000000000000000000000000000
+Content-Type: application/json
+
+{"eventId":"evt_1","userId":"u_2","amountMinor":5000}
