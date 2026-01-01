@@ -1,0 +1,6 @@
+node_modules/
+dist/
+coverage/
+shots/
+test-results/
+submission-*.zip

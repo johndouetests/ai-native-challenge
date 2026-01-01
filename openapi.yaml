@@ -1,0 +1,632 @@
+openapi: 3.1.0
+info:
+  title: Deskline Inbox API (simulator)
+  version: 1.0.0
+  description: |
+    HTTP API and WebSocket protocol served by the local simulator on port 4010.
+    All timestamps are ISO-8601 in UTC. All identifiers are strings (`t_1001`, `m_9001`, `a_1`).
+    Errors always use the shape `{ "error": { "code": "...", "message": "..." } }`.
+    There is no authentication: the current agent is Maya Lopez (`a_1`).
+
+    WebSocket: `ws://localhost:4010/ws?lastEventId=<n>` (the parameter is optional). Frames are JSON,
+    see the `WsFrame` schema. On connect with `lastEventId` the server replays buffered events starting
+    from that id inclusive (the buffer keeps the last 500 events). If the id is older than the buffer, or
+    unknown to the server, the server sends a single `resync` frame instead. `typing` frames have
+    `eventId: null` and are never replayed. The server sends `ping` every 15 seconds; the client may
+    reply with `{ "type": "pong" }`.
+servers:
+  - url: http://localhost:4010
+tags:
+  - name: agents
+  - name: tickets
+  - name: messages
+  - name: realtime
+  - name: simulator
+    description: Controls for reproducing network and realtime conditions. Not part of the product API.
+paths:
+  /api/me:
+    get:
+      tags: [agents]
+      operationId: getMe
+      summary: Current agent
+      responses:
+        '200':
+          description: The signed-in agent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Agent' }
+  /api/agents:
+    get:
+      tags: [agents]
+      operationId: listAgents
+      responses:
+        '200':
+          description: All agents
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Agent' }
+  /api/tickets:
+    get:
+      tags: [tickets]
+      operationId: listTickets
+      summary: List tickets with filters, sorting and cursor pagination
+      description: |
+        `q` matches the ticket key, subject and requester name (case-insensitive substring).
+        Sorting: `updated` (updatedAt desc, default), `created` (createdAt desc),
+        `priority` (urgent > high > normal > low, ties by updatedAt desc). Ties are broken by id.
+        `meta.unreadCount` counts unread tickets in the whole inbox and ignores filters.
+      parameters:
+        - name: status
+          in: query
+          description: Comma-separated list of statuses
+          schema: { type: string, example: 'open,pending' }
+        - name: priority
+          in: query
+          description: Comma-separated list of priorities
+          schema: { type: string, example: 'high,urgent' }
+        - name: assigneeId
+          in: query
+          description: An agent id, `me` or `unassigned`
+          schema: { type: string, example: me }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [updated, created, priority], default: updated }
+        - name: cursor
+          in: query
+          description: Opaque `nextCursor` from the previous page
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: One page of tickets
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TicketPage' }
+        '400':
+          description: '`invalid_parameter` (unknown status, priority or sort, bad cursor, limit outside 1..100)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/tickets/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [tickets]
+      operationId: getTicket
+      responses:
+        '200':
+          description: The ticket
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '404':
+          description: '`ticket_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    patch:
+      tags: [tickets]
+      operationId: updateTicket
+      description: |
+        Optimistic concurrency: `version` must equal the current ticket version. On success the
+        version is incremented, `updatedAt` is set to now and a `ticket.updated` event is broadcast.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TicketPatch' }
+      responses:
+        '200':
+          description: Updated ticket
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+        '404':
+          description: '`ticket_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`version_conflict`; `error.current` holds the current ticket'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`invalid_body` (missing version, unknown status, priority or assignee)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/tickets/{id}/read:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    post:
+      tags: [tickets]
+      operationId: markTicketRead
+      description: Marks the ticket as read. Idempotent. Does not change `updatedAt` or `version`.
+      responses:
+        '204':
+          description: Marked as read
+        '404':
+          description: '`ticket_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /api/tickets/{id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [messages]
+      operationId: listMessages
+      description: |
+        Messages are ordered by `createdAt`, then by id (ascending). Without `before` the latest
+        messages are returned. `prevCursor` points to older messages and is null at the beginning
+        of the conversation.
+      parameters:
+        - name: before
+          in: query
+          description: Opaque `prevCursor` from the previous page
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+      responses:
+        '200':
+          description: A page of messages, ascending
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessagePage' }
+        '400':
+          description: '`invalid_parameter`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: '`ticket_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [messages]
+      operationId: createMessage
+      description: |
+        Creates an agent message authored by the current agent and broadcasts `message.created`
+        followed by `ticket.updated`. Repeating a request with the same `clientMessageId` returns
+        200 with the message created earlier and creates nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewMessage' }
+      responses:
+        '200':
+          description: Message already existed for this `clientMessageId`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '201':
+          description: Message created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '404':
+          description: '`ticket_not_found`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: '`ticket_closed`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: '`invalid_body`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /ws:
+    get:
+      tags: [realtime]
+      operationId: websocket
+      summary: WebSocket upgrade (frames described by `WsFrame`)
+      parameters:
+        - name: lastEventId
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '101':
+          description: Switching protocols
+  /__sim:
+    get:
+      tags: [simulator]
+      operationId: simPanel
+      summary: HTML control panel
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema: { type: string }
+  /__sim/state:
+    get:
+      tags: [simulator]
+      operationId: simState
+      responses:
+        '200':
+          description: Current simulator settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimState' }
+  /__sim/disconnect:
+    post:
+      tags: [simulator]
+      operationId: simDisconnect
+      summary: Close all WebSocket connections
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+  /__sim/latency:
+    post:
+      tags: [simulator]
+      operationId: simLatency
+      summary: Add a delay to every /api response
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ms]
+              properties:
+                ms: { type: integer, minimum: 0, maximum: 60000 }
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+        '422': { $ref: '#/components/responses/SimInvalid' }
+  /__sim/fail:
+    post:
+      tags: [simulator]
+      operationId: simFail
+      summary: The next N matching /api requests get the given status
+      description: |
+        `status` 400..599 responds with `{ error: { code: "simulated_failure" } }`.
+        `status` 0 drops the connection without a response (a network error in the browser).
+        Rules are checked in the order they were added; each matching request consumes one use.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method, pathPrefix, status]
+              properties:
+                method: { type: string, example: GET, description: 'HTTP method or `*`' }
+                pathPrefix: { type: string, example: /api/tickets }
+                status: { type: integer, example: 500 }
+                times: { type: integer, minimum: 1, default: 1 }
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+        '422': { $ref: '#/components/responses/SimInvalid' }
+  /__sim/emit:
+    post:
+      tags: [simulator]
+      operationId: simEmit
+      summary: Emit an event right now
+      description: |
+        `message.created` adds a customer message to the ticket (optional `body`).
+        `typing` sends a typing frame for the ticket requester (optional `authorName`).
+        `ticket.updated` changes the ticket (optional `status`, `priority`, `assigneeId`; a random change otherwise).
+        `ticket.created` creates a new ticket (`ticketId` is ignored; optional `subject`, `status`, `priority`, `assigneeId`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [message.created, typing, ticket.updated, ticket.created] }
+                ticketId: { type: string }
+                body: { type: string }
+                authorName: { type: string }
+                subject: { type: string }
+                status: { $ref: '#/components/schemas/TicketStatus' }
+                priority: { $ref: '#/components/schemas/TicketPriority' }
+                assigneeId: { type: [string, 'null'] }
+      responses:
+        '200':
+          description: Emitted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  eventId: { type: [integer, 'null'] }
+                  ticketId: { type: string }
+        '404': { $ref: '#/components/responses/SimInvalid' }
+        '422': { $ref: '#/components/responses/SimInvalid' }
+  /__sim/pause:
+    post:
+      tags: [simulator]
+      operationId: simPause
+      summary: Pause the scenario engine
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+  /__sim/resume:
+    post:
+      tags: [simulator]
+      operationId: simResume
+      summary: Resume the scenario engine
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+  /__sim/stall:
+    post:
+      tags: [simulator]
+      operationId: simStall
+      summary: Keep sockets open but stop sending any frames (including ping)
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+  /__sim/unstall:
+    post:
+      tags: [simulator]
+      operationId: simUnstall
+      summary: Resume sending frames
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+  /__sim/reset:
+    post:
+      tags: [simulator]
+      operationId: simReset
+      summary: Restore the seed data and clear latency, failures and stall
+      description: |
+        Event ids keep growing across resets; the replay buffer is cleared and connected clients
+        receive `resync`. The paused/running state of the scenario engine is kept.
+        Optional `now` re-anchors the simulator clock (seed data is generated relative to it).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                now: { type: string, format: date-time }
+      responses:
+        '200': { $ref: '#/components/responses/SimOk' }
+components:
+  parameters:
+    TicketId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, example: t_1042 }
+  responses:
+    SimOk:
+      description: Done
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok]
+            properties:
+              ok: { type: boolean }
+    SimInvalid:
+      description: Invalid control request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    AgentColor:
+      type: string
+      description: Avatar palette key; the client maps it to a design token
+      enum: [blue, violet, teal, amber, rose, emerald, indigo, orange]
+    Agent:
+      type: object
+      additionalProperties: false
+      required: [id, name, initials, color]
+      properties:
+        id: { type: string, example: a_1 }
+        name: { type: string, example: Maya Lopez }
+        initials: { type: string, example: ML }
+        color: { $ref: '#/components/schemas/AgentColor' }
+    TicketStatus:
+      type: string
+      enum: [open, pending, resolved, closed]
+    TicketPriority:
+      type: string
+      enum: [low, normal, high, urgent]
+    TicketSummary:
+      type: object
+      additionalProperties: false
+      required: [id, key, subject, status, priority, requester, assigneeId, unread, createdAt, updatedAt, version]
+      properties:
+        id: { type: string, example: t_1042 }
+        key: { type: string, example: DSK-1042 }
+        subject: { type: string }
+        status: { $ref: '#/components/schemas/TicketStatus' }
+        priority: { $ref: '#/components/schemas/TicketPriority' }
+        requester:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties:
+            name: { type: string }
+        assigneeId: { type: [string, 'null'] }
+        unread: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version: { type: integer, minimum: 1 }
+    Ticket:
+      type: object
+      additionalProperties: false
+      required: [id, key, subject, status, priority, requester, assigneeId, unread, createdAt, updatedAt, version]
+      properties:
+        id: { type: string }
+        key: { type: string }
+        subject: { type: string }
+        status: { $ref: '#/components/schemas/TicketStatus' }
+        priority: { $ref: '#/components/schemas/TicketPriority' }
+        requester:
+          type: object
+          additionalProperties: false
+          required: [name, email]
+          properties:
+            name: { type: string }
+            email: { type: string, format: email }
+        assigneeId: { type: [string, 'null'] }
+        unread: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version: { type: integer, minimum: 1 }
+    TicketPatch:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version: { type: integer }
+        status: { $ref: '#/components/schemas/TicketStatus' }
+        priority: { $ref: '#/components/schemas/TicketPriority' }
+        assigneeId: { type: [string, 'null'] }
+    TicketPage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor, meta]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/TicketSummary' }
+        nextCursor: { type: [string, 'null'] }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [unreadCount, totalMatching]
+          properties:
+            unreadCount: { type: integer, minimum: 0 }
+            totalMatching: { type: integer, minimum: 0 }
+    MessageType:
+      type: string
+      enum: [customer, agent, system]
+    Message:
+      type: object
+      additionalProperties: false
+      required: [id, ticketId, type, authorName, authorId, body, createdAt, clientMessageId]
+      properties:
+        id: { type: string, example: m_9001 }
+        ticketId: { type: string }
+        type: { $ref: '#/components/schemas/MessageType' }
+        authorName: { type: string }
+        authorId: { type: [string, 'null'] }
+        body: { type: string }
+        createdAt: { type: string, format: date-time }
+        clientMessageId:
+          type: [string, 'null']
+          description: Set for agent messages, null otherwise
+    NewMessage:
+      type: object
+      additionalProperties: false
+      required: [clientMessageId, body]
+      properties:
+        clientMessageId: { type: string, format: uuid }
+        body: { type: string, minLength: 1, maxLength: 4000 }
+    MessagePage:
+      type: object
+      additionalProperties: false
+      required: [items, prevCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        prevCursor: { type: [string, 'null'] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            current: { $ref: '#/components/schemas/Ticket' }
+    SimState:
+      type: object
+      required: [paused, stalled, latencyMs, failRules, connections, lastEventId, now]
+      properties:
+        paused: { type: boolean }
+        stalled: { type: boolean }
+        latencyMs: { type: integer }
+        failRules:
+          type: array
+          items:
+            type: object
+            properties:
+              method: { type: string }
+              pathPrefix: { type: string }
+              status: { type: integer }
+              times: { type: integer }
+        connections: { type: integer }
+        lastEventId: { type: integer }
+        now: { type: string, format: date-time }
+    WsFrame:
+      oneOf:
+        - $ref: '#/components/schemas/WsMessageCreated'
+        - $ref: '#/components/schemas/WsTicketEvent'
+        - $ref: '#/components/schemas/WsTyping'
+        - $ref: '#/components/schemas/WsPing'
+        - $ref: '#/components/schemas/WsResync'
+    WsMessageCreated:
+      type: object
+      additionalProperties: false
+      required: [eventId, type, ticketId, data]
+      properties:
+        eventId: { type: integer, minimum: 1 }
+        type: { const: message.created }
+        ticketId: { type: string }
+        data: { $ref: '#/components/schemas/Message' }
+    WsTicketEvent:
+      type: object
+      additionalProperties: false
+      required: [eventId, type, ticketId, data]
+      properties:
+        eventId: { type: integer, minimum: 1 }
+        type: { type: string, enum: [ticket.created, ticket.updated] }
+        ticketId: { type: string }
+        data: { $ref: '#/components/schemas/TicketSummary' }
+    WsTyping:
+      type: object
+      additionalProperties: false
+      required: [eventId, type, ticketId, data]
+      properties:
+        eventId: { type: 'null' }
+        type: { const: typing }
+        ticketId: { type: string }
+        data:
+          type: object
+          additionalProperties: false
+          required: [authorName]
+          properties:
+            authorName: { type: string }
+    WsPing:
+      type: object
+      additionalProperties: false
+      required: [type, ts]
+      properties:
+        type: { const: ping }
+        ts: { type: string, format: date-time }
+    WsResync:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: { const: resync }

@@ -1,0 +1,123 @@
+/*
+ * Design tokens. Every color in the app comes from these variables.
+ * Values follow SPEC.md "Design tokens"; three were adjusted to reach 4.5:1 text contrast
+ * (light --muted-foreground, dark --primary-foreground, dark --destructive-foreground).
+ */
+:root {
+  color-scheme: light;
+
+  --background: #f8fafc;
+  --card: #ffffff;
+  --border: #e2e8f0;
+  --foreground: #0f172a;
+  --muted-foreground: #5b6b80;
+  --muted: #f1f5f9;
+  --accent: #eff6ff;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --ring: var(--primary);
+  --overlay: rgb(15 23 42 / 0.5);
+
+  --status-open-bg: #dbeafe;
+  --status-open-fg: #1e40af;
+  --status-pending-bg: #fef3c7;
+  --status-pending-fg: #92400e;
+  --status-resolved-bg: #dcfce7;
+  --status-resolved-fg: #166534;
+  --status-closed-bg: #e2e8f0;
+  --status-closed-fg: #334155;
+
+  --priority-low: #64748b;
+  --priority-normal: #2563eb;
+  --priority-high: #ea580c;
+  --priority-urgent: #dc2626;
+
+  --connection-live: #16a34a;
+  --connection-reconnecting: #a16207;
+  --connection-offline: #dc2626;
+
+  --avatar-blue-bg: #dbeafe;
+  --avatar-blue-fg: #1e40af;
+  --avatar-violet-bg: #ede9fe;
+  --avatar-violet-fg: #5b21b6;
+  --avatar-teal-bg: #ccfbf1;
+  --avatar-teal-fg: #115e59;
+  --avatar-amber-bg: #fef3c7;
+  --avatar-amber-fg: #92400e;
+  --avatar-rose-bg: #ffe4e6;
+  --avatar-rose-fg: #9f1239;
+  --avatar-emerald-bg: #d1fae5;
+  --avatar-emerald-fg: #065f46;
+  --avatar-indigo-bg: #e0e7ff;
+  --avatar-indigo-fg: #3730a3;
+  --avatar-orange-bg: #ffedd5;
+  --avatar-orange-fg: #9a3412;
+
+  --bubble-customer-bg: var(--muted);
+  --bubble-customer-fg: var(--foreground);
+  --bubble-agent-bg: var(--primary);
+  --bubble-agent-fg: var(--primary-foreground);
+
+  --header-height: 56px;
+  --list-width: 400px;
+  --row-min-height: 72px;
+
+  --z-header: 30;
+  --z-dropdown: 40;
+  --z-dialog: 50;
+  --z-toast: 60;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --background: #0b1120;
+  --card: #111827;
+  --border: #1f2937;
+  --foreground: #e5e7eb;
+  --muted-foreground: #94a3b8;
+  --muted: #1f2937;
+  --accent: #172554;
+  --primary: #3b82f6;
+  --primary-foreground: #0b1120;
+  --destructive: #f87171;
+  --destructive-foreground: #0b1120;
+  --overlay: rgb(0 0 0 / 0.6);
+
+  --status-open-bg: #1e3a8a;
+  --status-open-fg: #bfdbfe;
+  --status-pending-bg: #78350f;
+  --status-pending-fg: #fde68a;
+  --status-resolved-bg: #14532d;
+  --status-resolved-fg: #bbf7d0;
+  --status-closed-bg: #334155;
+  --status-closed-fg: #e2e8f0;
+
+  --priority-low: #94a3b8;
+  --priority-normal: #3b82f6;
+  --priority-high: #f97316;
+  --priority-urgent: #ef4444;
+
+  --connection-live: #22c55e;
+  --connection-reconnecting: #eab308;
+  --connection-offline: #f87171;
+
+  --avatar-blue-bg: #1e3a8a;
+  --avatar-blue-fg: #dbeafe;
+  --avatar-violet-bg: #4c1d95;
+  --avatar-violet-fg: #ede9fe;
+  --avatar-teal-bg: #134e4a;
+  --avatar-teal-fg: #ccfbf1;
+  --avatar-amber-bg: #78350f;
+  --avatar-amber-fg: #fef3c7;
+  --avatar-rose-bg: #881337;
+  --avatar-rose-fg: #ffe4e6;
+  --avatar-emerald-bg: #064e3b;
+  --avatar-emerald-fg: #d1fae5;
+  --avatar-indigo-bg: #312e81;
+  --avatar-indigo-fg: #e0e7ff;
+  --avatar-orange-bg: #7c2d12;
+  --avatar-orange-fg: #ffedd5;
+}
